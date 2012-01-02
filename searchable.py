@@ -4,7 +4,19 @@ import operator
 basedict = dict
 
 class searchable(object):
-  def where(self, clause, *args):
+  _key = "__dict__"
+  getter = operator.attrgetter(_key)
+  
+  @property
+  def key(self):
+    return self._key
+  
+  @key.setter  
+  def key(self,key):
+    self.getter = operator.attrgetter(key)
+    self._key = key
+    
+  def where(self, clause,  *args):
     # Todo: cache query
     assert clause.count('?') == len(args)
     for i, arg in enumerate(args):
@@ -12,7 +24,10 @@ class searchable(object):
 
     predicate = compile(clause, "<stdin>", 'eval')
     globals = {'_a_': args}
-    return self.__class__(filter(lambda r: eval(predicate, globals, r if isinstance(r,basedict) else r.__dict__), self))
+
+    getter = self.getter
+    
+    return self.__class__(filter(lambda r: eval(predicate, globals, r if isinstance(r,basedict) else getter(r)), self))
     
   def order_by(self, key):
     return self.__class__(sorted(self, key=operator.attrgetter(key)))
@@ -25,6 +40,9 @@ class set(set, searchable):
   pass
       
 class dict(dict):
-  def where(self, clause, *args):
-    return list(self.values()).where(clause, *args)
+  key = "__dict__"
+  def where(self, clause,  *args):
+    l = list(self.values())
+    l.key = self.key
+    return l.where(clause, *args)
   
