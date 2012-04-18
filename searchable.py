@@ -1,4 +1,5 @@
 import itertools
+import functools
 import operator
 
 basedict = dict
@@ -106,6 +107,7 @@ class Query(object):
     self._table = table
     self._limit=None
     self._where = {}
+    self._order = ()
     
     
   def ids(self):
@@ -113,16 +115,49 @@ class Query(object):
     indexes = self._table.indexes
 
     if self._where:
-      clause = self._where.copy()
-      attr,val = clause.popitem()
-      row_ids = indexes[attr][val]
+      search_plan = []
+      uattrs  = [] # unindexed attrs
+      uvals  = [] # unindexed vals
+      for attr,val in self._where.items():
+        # lookup indexes using get to avoid default dict creating new
+        # keys
+        index = indexes.get(attr)
+        if index is not None:
+          search_plan.append((len(index),index, val))
+        else:
+          uattrs.append(attr)
+          uvals.append(val)
+      
+      # sort indexes based on cardinality, higher cardinality to make set intersection
+      # faster
+      if search_plan:
+        search = sorted(search_plan,  reverse=True)
+        ignored, index, val = search_plan[0]
+        row_ids = index[val]
+        for ignored, index, val in search_plan[1:]:
+          row_ids &= index[val]
+      else: # ug unindexed search
+        row_ids = xrange(len(self._table.records))
+      
+      if not uattrs: # 100% answered by indexes
+        return row_ids
+       
+      def selector(key, *args):
+        obj = args[-1]
+        return tuple([key(obj, arg) for arg in args[:-1]])
 
-      while(clause):
-        attr,val = clause.popitem()
-        row_ids &= indexes[attr][val]
+      getter = functools.partial(selector, self._table.key, *uattrs)#operator.itemgetter(*uattrs)
+      uvals = tuple(uvals)
+      def func(row_id):
+        try:
+          return getter(self._table.records[row_id]) == uvals
+        except LookupError:
+          pass
+      return itertools.ifilter(func, row_ids )
+  
     else:
-      row_ids = [i for (i,r) in enumerate(self._table.records) if r is not None]
-    return row_ids
+      return [i for (i,r) in enumerate(self._table.records) if r is not None]
+  
   
   def __iter__(self):
     if self._limit is None:
@@ -151,6 +186,10 @@ class Query(object):
     self._where = kw
     return self
     
+  def order_by(self, *order):
+    self._order = order
+    return self
+    
 class Update(Query):
   def __init__(self, table):
     super(Update,self).__init__(table)
@@ -167,8 +206,10 @@ class Update(Query):
       for row_id in self.ids():
         obj = records[row_id]
         for attr,val in self._set.items():
-          indexes[attr][obj[attr]].remove(row_id)
-          indexes[attr][val].add(row_id)
+          index = indexes.get(attr)
+          if index:
+            index[obj[attr]].remove(row_id)
+            index[attr][val].add(row_id)
           obj[attr]=val
 
 class Delete(Query):
@@ -199,20 +240,41 @@ class Delete(Query):
             
 
 class STable(object):
-  def __init__(self):
+  """Provides an interface for working with objecs as if they
+  lived in a databe. 
+  
+  Features include multiple values for fast lookup, ordering
+  and bulk operations based on querying.
+  
+  
+  """
+  def __init__(self, key=operator.getitem):
     self.indexes = defaultdict(lambda:defaultdict(set))
     self.records=[]
     self.deleted = set()
+    # key is a function used to retreive the value
+    # from a record object
+    self.key = key
     
   def __iter__(self):
     return iter(self.records)
   
+  def __value(self, record, attr, default=None):
+    """Returns the value using the key function or None if the record does not have such value
+    """ 
+    # shame that python operator.getitem and ilk don't support deafult values 
+    try:
+      return self.key(record, attr)
+    except LookupError:
+      return default
+    
     
   def create_index(self, attr):
+    key = self.key
     if attr not in self.indexes:
       index = self.indexes[attr]
       for i, record in enumerate(self.records):
-        index[attr][record[attr]].add(i)
+        index[attr][self.__value(record,attr)].add(i)
         
   def delete(self):
     return Delete(self)
@@ -220,8 +282,9 @@ class STable(object):
   def insert(self,record):
     row_id = len(self.records)
     self.records.append(record)
+
     for attr,index in self.indexes.items():
-      index[record.get(attr)].add(row_id)
+      index[self.__value(record, attr)].add(row_id)
       
   def update(self):
     return Update(self)
