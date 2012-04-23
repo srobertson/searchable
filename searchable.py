@@ -133,7 +133,7 @@ class Query(object):
       if search_plan:
         search = sorted(search_plan,  reverse=True)
         ignored, index, val = search_plan[0]
-        row_ids = index[val]
+        row_ids = index[val].copy()
         for ignored, index, val in search_plan[1:]:
           row_ids &= index[val]
       else: # ug unindexed search
@@ -201,16 +201,23 @@ class Update(Query):
     
   def execute(self):
     if self._set:
+      _getter = self._table._getter
+      _setter = self._table._setter
       records = self._table.records
       indexes = self._table.indexes
       for row_id in self.ids():
         obj = records[row_id]
         for attr,val in self._set.items():
+          old_val = _getter(obj, attr)
           index = indexes.get(attr)
           if index:
-            index[obj[attr]].remove(row_id)
-            index[attr][val].add(row_id)
-          obj[attr]=val
+            index[old_val].remove(row_id)
+            index[val].add(row_id)
+            
+          # be interesting to call set_value here if we had KVO compliant
+          # dictionaries
+          
+          _setter(obj, attr, val)
 
 class Delete(Query):
   def execute(self):
@@ -221,14 +228,16 @@ class Delete(Query):
     
     if self._where:
       indexes = self._table.indexes
+      _getter = self._table._getter
       records = self._table.records
       deleted = self._table.deleted
       for row_id in self.ids():
-        obj = self.records[row_id]
+        obj = records[row_id]
         records[row_id]=None
         deleted.add(row_id)
-        for attr,val in self._where.items():
-          indexes[attr][val].remove(row_id)
+        for attr,index in indexes.items():
+          val = _getter(obj, attr)
+          index[val].remove(row_id)
     else:
       # no where clause, nuke everything
       self._table.records=[]
@@ -252,6 +261,7 @@ class STable(object):
     self.indexes = defaultdict(lambda:defaultdict(set))
     self.records=[]
     self.deleted = set()
+    
     # key is a function used to retreive the value
     # from a record object
     self.key = key
@@ -259,7 +269,7 @@ class STable(object):
   def __iter__(self):
     return iter(self.records)
   
-  def __value(self, record, attr, default=None):
+  def _getter(self, record, attr, default=None):
     """Returns the value using the key function or None if the record does not have such value
     """ 
     # shame that python operator.getitem and ilk don't support deafult values 
@@ -267,14 +277,20 @@ class STable(object):
       return self.key(record, attr)
     except LookupError:
       return default
-    
+      
+  def _setter(self, obj,attr,value):
+    """Sets the value in the way most appropriate for the object."""
+    if isinstance(obj, dict):
+      obj[attr] = value
+    else:
+      setattr(obj, attr, value)    
     
   def create_index(self, attr):
     key = self.key
     if attr not in self.indexes:
       index = self.indexes[attr]
       for i, record in enumerate(self.records):
-        index[attr][self.__value(record,attr)].add(i)
+        index[attr][self._getter(record,attr)].add(i)
         
   def delete(self):
     return Delete(self)
@@ -284,7 +300,7 @@ class STable(object):
     self.records.append(record)
 
     for attr,index in self.indexes.items():
-      index[self.__value(record, attr)].add(row_id)
+      index[self._getter(record, attr)].add(row_id)
       
   def update(self):
     return Update(self)
